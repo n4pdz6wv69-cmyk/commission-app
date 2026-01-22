@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>GFE Commission System</title>
+  
+  <!-- 1. iOS PWA 設定 -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="GFE Sales">
+  
+  <!-- 🔴🔴🔴 已修改：直接讀取資料夾內的 icon.png 🔴🔴🔴 -->
+  <!-- 請確保你的圖片檔名叫做 "icon.png" 並放在同一個資料夾內 -->
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="icon" type="image/png" href="icon.png">
+
+  <!-- 2. Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            earth: {
+              50: '#fafaf9',
+              100: '#f5f5f4',
+              200: '#e7e5e4',
+              300: '#d6d3d1',
+              400: '#a8a29e',
+              500: '#78716c',
+              600: '#57534e',
+              700: '#44403c', // 主要深色 (Stone-700)
+              800: '#292524',
+              900: '#1c1917',
+            },
+            accent: {
+              50: '#fff7ed',
+              100: '#ffedd5',
+              500: '#f97316', // 琥珀/橙色點綴
+              600: '#ea580c',
+              700: '#c2410c', // 按鈕深色
+            }
+          }
+        }
+      }
+    }
+  </script>
+  
+  <!-- 3. React & Firebase -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js",
+        "lucide-react": "https://esm.sh/lucide-react@0.303.0"
+      }
+    }
+  </script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { 
+      background-color: #f5f5f4; /* Stone-100 */
+      touch-action: manipulation; 
+      -webkit-tap-highlight-color: transparent;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      color: #44403c;
+    }
+    .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    input, select, button { font-size: 16px; }
+    
+    /* 隱藏滾動條但保留功能 */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- 4. 主程式 -->
+  <script type="text/babel" data-type="module">
+    import React, { useState, useEffect, useMemo, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { initializeApp } from 'firebase/app';
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+    import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+    import { 
+      Briefcase, Users, Calendar, LogOut, ShieldCheck, User, Camera, 
+      FileText, Trash2, Lock, UserPlus, Image as ImageIcon, Info, X, 
+      ChevronLeft, ChevronRight, LayoutGrid, List, BarChart3, ZoomIn, CheckCircle2
+    } from 'lucide-react';
+
+    // --- Firebase 設定 ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyBItL5d89phnqB3x0UnPPRw6L0gK6SXR4w",
+      authDomain: "gfe-commission-app.firebaseapp.com",
+      projectId: "gfe-commission-app",
+      storageBucket: "gfe-commission-app.firebasestorage.app",
+      messagingSenderId: "619768976206",
+      appId: "1:619768976206:web:cf170c9073a78a0839441f"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const appId = 'gfe-production-v1';
+
+    // --- 圖片壓縮 ---
+    const resizeImage = (file) => {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const MAX_WIDTH = 1000; const MAX_HEIGHT = 1000;
+            let width = img.width; let height = img.height;
+            if (width > height) { if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; } } 
+            else { if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; } }
+            canvas.width = width; canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', 0.7));
+          };
+          img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+    };
+
+    // --- 佣金計算核心 ---
+    const calculateDailyCommission = (dailyTotal) => {
+      let amount = 0;
+      let label = '未達標';
+      if (dailyTotal >= 10000) { amount = dailyTotal * 0.08; label = '8%'; } 
+      else if (dailyTotal >= 8000) { amount = 500; label = '$500'; } 
+      else if (dailyTotal >= 5000) { amount = 250; label = '$250'; } 
+      else if (dailyTotal >= 3200) { amount = 100; label = '$100'; }
+      return { amount: Math.round(amount), label };
+    };
+
+    // --- 元件: 圖片放大 Modal ---
+    const ImageModal = ({ src, onClose }) => {
+      if (!src) return null;
+      return (
+        <div className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-4 animate-fade-in" onClick={onClose}>
+          <button className="absolute top-4 right-4 text-white/80 hover:text-white p-2" onClick={onClose}>
+            <X size={32} />
+          </button>
+          <img src={src} className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
+        </div>
+      );
+    };
+
+    // --- 元件: 登入介面 (大地色系) ---
+    const LoginScreen = ({ onLogin, staffList, loadingStaff }) => {
+      const [username, setUsername] = useState('');
+      const [password, setPassword] = useState('');
+      const [error, setError] = useState('');
+      const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+      const handleLogin = async (e) => {
+        e.preventDefault();
+        setError('');
+        setIsLoggingIn(true);
+
+        if (username === 'admin' && password === '1234') {
+          await performFirebaseLogin();
+          onLogin({ username: 'Admin', role: 'admin', uid: 'admin_master' });
+          setIsLoggingIn(false);
+          return;
+        }
+
+        const userAccount = staffList.find(u => u.username.toLowerCase() === username.toLowerCase() && u.password === password);
+        if (userAccount) {
+          await performFirebaseLogin();
+          onLogin(userAccount);
+        } else {
+          setError('用戶名或密碼錯誤');
+        }
+        setIsLoggingIn(false);
+      };
+
+      const performFirebaseLogin = async () => {
+        try { if (!auth.currentUser) await signInAnonymously(auth); } catch (err) { console.error("Firebase Auth Error", err); }
+      };
+
+      return (
+        <div className="min-h-screen bg-earth-100 flex items-center justify-center p-6">
+          <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border border-earth-200">
+            <div className="text-center mb-8">
+              <div className="bg-earth-700 w-16 h-16 rounded-2xl rotate-3 flex items-center justify-center mx-auto mb-5 shadow-lg">
+                <Briefcase className="text-earth-50 w-8 h-8" />
+              </div>
+              <h1 className="text-2xl font-bold text-earth-800 tracking-tight">GFE Commission</h1>
+              <p className="text-earth-500 mt-1">內部銷售管理系統</p>
+            </div>
+            <form onSubmit={handleLogin} className="space-y-5">
+              <div>
+                <label className="block text-sm font-bold text-earth-600 mb-1.5 ml-1">登入帳號</label>
+                <input type="text" required className="w-full px-4 py-3.5 bg-earth-50 border border-earth-200 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-transparent outline-none transition text-earth-800 font-medium" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="輸入您的 ID" />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-earth-600 mb-1.5 ml-1">密碼</label>
+                <input type="password" required className="w-full px-4 py-3.5 bg-earth-50 border border-earth-200 rounded-xl focus:ring-2 focus:ring-accent-500 focus:border-transparent outline-none transition text-earth-800 font-medium" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="輸入密碼" />
+              </div>
+              {error && <div className="text-red-500 text-sm bg-red-50 p-3 rounded-xl border border-red-100 text-center font-medium">{error}</div>}
+              <button type="submit" disabled={loadingStaff || isLoggingIn} className="w-full bg-earth-800 hover:bg-earth-900 text-white font-bold py-4 rounded-xl shadow-lg transition flex items-center justify-center text-lg active:scale-[0.98]">
+                {loadingStaff ? '連接中...' : isLoggingIn ? '登入中...' : '進入系統'}
+              </button>
+            </form>
+            {/* 移除預設密碼提示 */}
+          </div>
+        </div>
+      );
+    };
+
+    // --- 主程式 App ---
+    const App = () => {
+      const [currentUser, setCurrentUser] = useState(null); 
+      const [authUser, setAuthUser] = useState(null);
+      const [activeTab, setActiveTab] = useState('sales'); 
+      const [sales, setSales] = useState([]);
+      const [staffList, setStaffList] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+      const [showInfoModal, setShowInfoModal] = useState(false);
+      const [previewImage, setPreviewImage] = useState(null); // Lightbox state
+      
+      // View States
+      const [viewMode, setViewMode] = useState('daily');
+      const [calendarDate, setCalendarDate] = useState(new Date());
+      const [adminViewingStaff, setAdminViewingStaff] = useState(null); // Admin 正在查看的員工 ID
+
+      // Input Forms
+      const [saleAmount, setSaleAmount] = useState('');
+      const [saleNote, setSaleNote] = useState('');
+      const [saleImage, setSaleImage] = useState(null);
+      const fileInputRef = useRef(null);
+      const [isSubmittingSale, setIsSubmittingSale] = useState(false);
+
+      // Admin Forms
+      const [newStaffName, setNewStaffName] = useState('');
+      const [newStaffUser, setNewStaffUser] = useState('');
+      const [newStaffPass, setNewStaffPass] = useState('');
+      const [newStaffRole, setNewStaffRole] = useState('sales');
+
+      // Init
+      useEffect(() => {
+        const initAuth = async () => { try { await signInAnonymously(auth); } catch (error) { console.error("Auth init error:", error); } };
+        initAuth();
+        const unsubscribe = onAuthStateChanged(auth, (user) => setAuthUser(user));
+        return () => unsubscribe();
+      }, []);
+
+      useEffect(() => {
+        if (!authUser) return;
+        const staffRef = collection(db, 'artifacts', appId, 'public', 'data', 'staff_accounts');
+        const unsubStaff = onSnapshot(staffRef, (snapshot) => {
+          setStaffList(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+          setLoading(false);
+        });
+        const salesRef = collection(db, 'artifacts', appId, 'public', 'data', 'sales_records');
+        const unsubSales = onSnapshot(salesRef, (snapshot) => {
+          setSales(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)));
+        });
+        const cachedUser = localStorage.getItem('gfe_user_session');
+        if (cachedUser) setCurrentUser(JSON.parse(cachedUser));
+        return () => { unsubStaff(); unsubSales(); };
+      }, [authUser]);
+
+      const handleLoginSuccess = (userObj) => {
+        setCurrentUser(userObj);
+        localStorage.setItem('gfe_user_session', JSON.stringify(userObj));
+        if (userObj.role === 'admin') setActiveTab('staff'); else setActiveTab('sales');
+      };
+
+      const handleLogout = () => {
+        setCurrentUser(null); localStorage.removeItem('gfe_user_session');
+        setActiveTab('sales'); setViewMode('daily'); setAdminViewingStaff(null);
+      };
+
+      const handleFileChange = async (e) => {
+        const file = e.target.files[0];
+        if (file) { try { const resizedBase64 = await resizeImage(file); setSaleImage(resizedBase64); } catch (err) { alert('圖片處理失敗'); } }
+      };
+
+      // --- Data Logic ---
+      
+      // Determine the target user for Calendar/Daily logic (Self or Admin viewing someone)
+      const targetUserId = useMemo(() => {
+        if (currentUser?.role === 'admin' && adminViewingStaff) return adminViewingStaff.username;
+        return currentUser?.username;
+      }, [currentUser, adminViewingStaff]);
+
+      const myDailySales = useMemo(() => {
+        if (!targetUserId) return [];
+        return sales.filter(s => s.salespersonId === targetUserId && s.date === selectedDate);
+      }, [sales, targetUserId, selectedDate]);
+
+      const dailyTotal = useMemo(() => {
+        return myDailySales.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0);
+      }, [myDailySales]);
+
+      const commissionInfo = useMemo(() => {
+        const { amount, label } = calculateDailyCommission(dailyTotal);
+        let nextTier = null; let nextTierReward = '';
+        if (dailyTotal >= 10000) { nextTier = null; }
+        else if (dailyTotal >= 8000) { nextTier = 10000; nextTierReward = '8%'; }
+        else if (dailyTotal >= 5000) { nextTier = 8000; nextTierReward = '$500'; }
+        else if (dailyTotal >= 3200) { nextTier = 5000; nextTierReward = '$250'; }
+        else { nextTier = 3200; nextTierReward = '$100'; }
+        return { label, amount, nextTier, nextTierReward };
+      }, [dailyTotal]);
+
+      const calendarData = useMemo(() => {
+        // Allow calendar data generation if in calendar mode OR if admin is viewing a staff member report
+        if ((viewMode !== 'calendar' && !adminViewingStaff) || !targetUserId) return null;
+        
+        const year = calendarDate.getFullYear();
+        const month = calendarDate.getMonth();
+        const firstDay = new Date(year, month, 1);
+        const lastDay = new Date(year, month + 1, 0);
+        const daysInMonth = lastDay.getDate();
+        const startDayOfWeek = firstDay.getDay(); 
+        const monthlyStats = {}; let totalMonthlySales = 0; let totalMonthlyCommission = 0;
+        const monthPrefix = `${year}-${String(month + 1).padStart(2, '0')}`;
+        const myMonthSales = sales.filter(s => s.salespersonId === targetUserId && s.date.startsWith(monthPrefix));
+        
+        myMonthSales.forEach(s => { if (!monthlyStats[s.date]) monthlyStats[s.date] = 0; monthlyStats[s.date] += (parseFloat(s.amount) || 0); });
+        
+        Object.keys(monthlyStats).forEach(date => {
+          const dayTotal = monthlyStats[date];
+          const comm = calculateDailyCommission(dayTotal).amount;
+          totalMonthlySales += dayTotal; totalMonthlyCommission += comm;
+          monthlyStats[date] = { sales: dayTotal, commission: comm };
+        });
+        return { year, month, daysInMonth, startDayOfWeek, monthlyStats, totalMonthlySales, totalMonthlyCommission };
+      }, [viewMode, calendarDate, sales, targetUserId, adminViewingStaff]);
+
+      const handleSubmitSale = async (e) => {
+        e.preventDefault();
+        if (!saleAmount) return;
+        if (!saleImage) { alert("請必須上傳單據照片才能提交！"); return; }
+        setIsSubmittingSale(true);
+        try {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'sales_records'), {
+            date: selectedDate, amount: parseFloat(saleAmount), note: saleNote, imageUrl: saleImage,
+            salespersonId: currentUser.username, salespersonName: currentUser.displayName || currentUser.username, timestamp: serverTimestamp()
+          });
+          setSaleAmount(''); setSaleNote(''); setSaleImage(null); if (fileInputRef.current) fileInputRef.current.value = '';
+        } catch (error) { alert("儲存失敗"); } finally { setIsSubmittingSale(false); }
+      };
+
+      const handleDeleteSale = async (docId) => { if (window.confirm('確定要刪除此紀錄？')) await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sales_records', docId)); };
+      
+      const handleAddStaff = async (e) => {
+        e.preventDefault();
+        if (!newStaffUser || !newStaffPass || !newStaffName) return;
+        if (staffList.some(u => u.username.toLowerCase() === newStaffUser.toLowerCase())) { alert('該帳號 ID 已被使用'); return; }
+        try {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'staff_accounts'), {
+            username: newStaffUser, password: newStaffPass, displayName: newStaffName, role: newStaffRole, createdAt: serverTimestamp()
+          });
+          setNewStaffName(''); setNewStaffUser(''); setNewStaffPass(''); alert('員工帳號建立成功');
+        } catch (error) { alert('建立失敗'); }
+      };
+
+      const handleDeleteStaff = async (staffId) => { if (window.confirm('確定要刪除此員工帳號？')) await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'staff_accounts', staffId)); };
+
+      // Switch to Admin Report View
+      const handleViewStaffReport = (staff) => {
+        setAdminViewingStaff(staff);
+        setActiveTab('sales'); // Switch to sales tab
+        setViewMode('calendar'); // Default to calendar view for overview
+      };
+
+      const closeAdminReport = () => {
+        setAdminViewingStaff(null);
+        setViewMode('daily'); // Reset to default list view
+      };
+
+      if (!currentUser) return <LoginScreen onLogin={handleLoginSuccess} staffList={staffList} loadingStaff={loading} />;
+
+      return (
+        <div className="min-h-screen bg-earth-50 text-earth-800 font-sans pb-20">
+          <ImageModal src={previewImage} onClose={() => setPreviewImage(null)} />
+
+          {/* Info Modal */}
+          {showInfoModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 animate-fade-in">
+              <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden">
+                <div className="bg-earth-800 p-4 text-white flex justify-between items-center">
+                  <h3 className="font-bold text-lg flex items-center gap-2"><Info size={20}/> 佣金計算機制</h3>
+                  <button onClick={() => setShowInfoModal(false)}><X size={24}/></button>
+                </div>
+                <div className="p-5">
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-center p-3 bg-earth-50 rounded-lg"><span className="text-earth-600 font-medium">HKD 0 - 3,199</span><span className="font-bold text-earth-400">$0</span></div>
+                    <div className="flex justify-between items-center p-3 bg-white border border-earth-200 rounded-lg"><span className="text-earth-700 font-medium">HKD 3,200+</span><span className="font-bold text-accent-600">$100</span></div>
+                    <div className="flex justify-between items-center p-3 bg-white border border-earth-200 rounded-lg"><span className="text-earth-700 font-medium">HKD 5,000+</span><span className="font-bold text-accent-600">$250</span></div>
+                    <div className="flex justify-between items-center p-3 bg-white border border-earth-200 rounded-lg"><span className="text-earth-700 font-medium">HKD 8,000+</span><span className="font-bold text-accent-600">$500</span></div>
+                    <div className="flex justify-between items-center p-3 bg-accent-50 border border-accent-100 rounded-lg shadow-sm"><span className="text-earth-800 font-bold">HKD 10,000+</span><span className="font-bold text-accent-600 text-lg">8%</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Header */}
+          <header className="bg-white shadow-sm sticky top-0 z-40 border-b border-earth-100">
+            <div className="max-w-2xl mx-auto px-4 py-3 flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                {/* 如果管理員正在查看員工報表，顯示返回按鈕 */}
+                {adminViewingStaff ? (
+                  <button onClick={closeAdminReport} className="flex items-center gap-2 text-earth-600 font-bold">
+                    <ChevronLeft size={24}/> 返回
+                  </button>
+                ) : (
+                  <>
+                    <div className={`p-2.5 rounded-xl text-white shadow-md ${currentUser.role === 'admin' ? 'bg-earth-800' : 'bg-earth-700'}`}>
+                      {currentUser.role === 'admin' ? <ShieldCheck size={20} /> : <Briefcase size={20} />}
+                    </div>
+                    <div>
+                      <h1 className="font-bold text-lg leading-none text-earth-800">GFE Commission</h1>
+                      <p className="text-xs text-earth-500 mt-1 font-medium">{currentUser.displayName}</p>
+                    </div>
+                  </>
+                )}
+              </div>
+              {!adminViewingStaff && (
+                <button onClick={handleLogout} className="text-earth-400 hover:text-red-500 p-2"><LogOut size={20} /></button>
+              )}
+            </div>
+
+            {/* Admin Tabs */}
+            {currentUser.role === 'admin' && !adminViewingStaff && (
+              <div className="flex border-t border-earth-100 bg-earth-50">
+                <button onClick={() => setActiveTab('staff')} className={`flex-1 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'staff' ? 'border-accent-600 text-accent-700 bg-white' : 'border-transparent text-earth-500'}`}>員工管理</button>
+                <button onClick={() => setActiveTab('sales')} className={`flex-1 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'sales' ? 'border-accent-600 text-accent-700 bg-white' : 'border-transparent text-earth-500'}`}>銷售監察 (總覽)</button>
+              </div>
+            )}
+            
+            {/* Admin Viewing Staff Title */}
+            {adminViewingStaff && (
+              <div className="px-4 py-2 bg-accent-50 text-accent-800 text-sm font-bold text-center border-t border-accent-100">
+                正在查看: {adminViewingStaff.displayName} 的報表
+              </div>
+            )}
+          </header>
+
+          <main className="max-w-2xl mx-auto p-4">
+            
+            {/* Admin: Staff Management */}
+            {activeTab === 'staff' && currentUser.role === 'admin' && !adminViewingStaff && (
+              <div className="space-y-6 animate-fade-in">
+                <div className="bg-white p-5 rounded-2xl shadow-sm border border-earth-200">
+                  <h3 className="font-bold text-earth-800 mb-4 flex items-center gap-2"><UserPlus size={20} className="text-accent-600" /> 新增員工帳號</h3>
+                  <form onSubmit={handleAddStaff} className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <input type="text" required placeholder="姓名" className="w-full px-3 py-2.5 bg-earth-50 border-earth-200 border rounded-xl text-sm focus:border-accent-500 outline-none" value={newStaffName} onChange={e => setNewStaffName(e.target.value)} />
+                      <select className="w-full px-3 py-2.5 bg-earth-50 border-earth-200 border rounded-xl text-sm focus:border-accent-500 outline-none" value={newStaffRole} onChange={e => setNewStaffRole(e.target.value)}><option value="sales">Sales</option><option value="admin">Admin</option></select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <input type="text" required placeholder="Login ID" className="w-full px-3 py-2.5 bg-earth-50 border-earth-200 border rounded-xl text-sm focus:border-accent-500 outline-none" value={newStaffUser} onChange={e => setNewStaffUser(e.target.value)} />
+                      <input type="text" required placeholder="Password" className="w-full px-3 py-2.5 bg-earth-50 border-earth-200 border rounded-xl text-sm focus:border-accent-500 outline-none" value={newStaffPass} onChange={e => setNewStaffPass(e.target.value)} />
+                    </div>
+                    <button type="submit" className="w-full bg-earth-800 hover:bg-earth-900 text-white font-medium py-2.5 rounded-xl mt-2 shadow-sm">建立帳號</button>
+                  </form>
+                </div>
+                <div className="space-y-3">
+                  <h4 className="text-xs font-bold text-earth-400 uppercase tracking-wide ml-1">現有員工 ({staffList.length})</h4>
+                  {staffList.map(staff => (
+                    <div key={staff.id} className="bg-white p-4 rounded-2xl border border-earth-200 shadow-sm flex justify-between items-center">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold shadow-sm ${staff.role === 'admin' ? 'bg-earth-600' : 'bg-earth-400'}`}>{staff.displayName?.[0]?.toUpperCase()}</div>
+                        <div><div className="font-bold text-earth-800">{staff.displayName}</div><div className="text-xs text-earth-500">ID: {staff.username}</div></div>
+                      </div>
+                      <div className="flex gap-2">
+                        {/* Admin Action: View Report */}
+                        <button onClick={() => handleViewStaffReport(staff)} className="flex items-center gap-1 px-3 py-1.5 bg-accent-50 text-accent-700 rounded-lg text-xs font-bold hover:bg-accent-100 transition">
+                          <BarChart3 size={14} /> 報表
+                        </button>
+                        <button onClick={() => handleDeleteStaff(staff.id)} className="text-earth-300 hover:text-red-500 p-2"><Trash2 size={18} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Sales Area (Shared by Salesperson & Admin View Mode) */}
+            {activeTab === 'sales' && (
+              <div className="space-y-5 animate-fade-in">
+                
+                {/* View Switcher: Salesperson sees always, Admin sees only when inside a report */}
+                {(currentUser.role !== 'admin' || adminViewingStaff) && (
+                  <div className="bg-earth-200/50 p-1 rounded-xl flex text-sm font-medium mb-2">
+                    <button onClick={() => setViewMode('daily')} className={`flex-1 py-2.5 rounded-lg flex items-center justify-center gap-2 transition ${viewMode === 'daily' ? 'bg-white text-earth-800 shadow-sm font-bold' : 'text-earth-500'}`}><List size={16}/> 日常輸入</button>
+                    <button onClick={() => setViewMode('calendar')} className={`flex-1 py-2.5 rounded-lg flex items-center justify-center gap-2 transition ${viewMode === 'calendar' ? 'bg-white text-earth-800 shadow-sm font-bold' : 'text-earth-500'}`}><LayoutGrid size={16}/> 月曆 & 薪金</button>
+                  </div>
+                )}
+
+                {/* Calendar View */}
+                {viewMode === 'calendar' && ((currentUser.role !== 'admin') || adminViewingStaff) && calendarData && (
+                  <div className="space-y-4">
+                    <div className="bg-white rounded-2xl shadow-sm border border-earth-200 overflow-hidden">
+                      <div className="p-4 bg-earth-50 border-b border-earth-100 flex justify-between items-center">
+                        <button onClick={() => setCalendarDate(new Date(calendarDate.setMonth(calendarDate.getMonth() - 1)))} className="p-2 hover:bg-earth-200 rounded-full text-earth-600"><ChevronLeft size={20}/></button>
+                        <h3 className="font-bold text-lg text-earth-800">{calendarData.year}年 {calendarData.month + 1}月</h3>
+                        <button onClick={() => setCalendarDate(new Date(calendarDate.setMonth(calendarDate.getMonth() + 1)))} className="p-2 hover:bg-earth-200 rounded-full text-earth-600"><ChevronRight size={20}/></button>
+                      </div>
+                      
+                      {/* Top Summary */}
+                      <div className="grid grid-cols-2 divide-x divide-earth-100 border-b border-earth-100">
+                        <div className="p-4 text-center">
+                          <p className="text-xs text-earth-400 uppercase font-bold tracking-wider">本月總營業額</p>
+                          <p className="text-xl font-bold text-earth-800 mt-1">${calendarData.totalMonthlySales.toLocaleString()}</p>
+                        </div>
+                        <div className="p-4 text-center bg-accent-50/50">
+                          <p className="text-xs text-earth-400 uppercase font-bold tracking-wider">目前累計佣金</p>
+                          <p className="text-xl font-bold text-accent-600 mt-1">${calendarData.totalMonthlyCommission.toLocaleString()}</p>
+                        </div>
+                      </div>
+
+                      {/* Grid */}
+                      <div className="p-4">
+                        <div className="grid grid-cols-7 text-center text-xs text-earth-400 font-bold mb-2"><div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div></div>
+                        <div className="grid grid-cols-7 gap-2">
+                          {Array.from({ length: calendarData.startDayOfWeek }).map((_, i) => <div key={`empty-${i}`}></div>)}
+                          {Array.from({ length: calendarData.daysInMonth }).map((_, i) => {
+                            const day = i + 1;
+                            const dateStr = `${calendarData.year}-${String(calendarData.month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                            const hasData = calendarData.monthlyStats[dateStr];
+                            const isToday = dateStr === new Date().toISOString().split('T')[0];
+                            return (
+                              <div key={day} onClick={() => { setSelectedDate(dateStr); setViewMode('daily'); }} className={`aspect-square rounded-xl flex flex-col items-center justify-center cursor-pointer border transition text-xs ${isToday ? 'border-accent-500 ring-2 ring-accent-100 z-10 bg-white' : 'border-earth-100'} ${hasData ? 'bg-earth-50' : 'bg-white hover:bg-earth-50'}`}>
+                                <span className={`font-bold mb-0.5 ${isToday ? 'text-accent-600' : 'text-earth-600'}`}>{day}</span>
+                                {hasData ? <div className="text-[10px] flex flex-col items-center"><span className="text-earth-400 scale-90">${(hasData.sales/1000).toFixed(1)}k</span><span className="text-accent-600 font-bold bg-accent-50 px-1 rounded-sm mt-0.5">+${hasData.commission}</span></div> : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Footer Summary Card (Requested Feature) */}
+                    <div className="bg-earth-800 text-white p-5 rounded-2xl shadow-lg flex justify-between items-center">
+                      <div>
+                        <p className="text-earth-300 text-xs font-medium uppercase tracking-wider mb-1">本月最終預計收入</p>
+                        <p className="text-sm text-earth-400">Total Commission</p>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-3xl font-bold text-accent-400 tracking-tight">${calendarData.totalMonthlyCommission.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Daily View */}
+                {(viewMode === 'daily' || (currentUser.role === 'admin' && !adminViewingStaff)) && (
+                  <>
+                    <div className="flex items-center gap-3 bg-white p-3.5 rounded-2xl shadow-sm border border-earth-200">
+                      <Calendar size={20} className="text-earth-400" />
+                      <span className="text-sm font-bold text-earth-600">選擇日期:</span>
+                      <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="font-bold text-earth-800 bg-transparent outline-none flex-1 h-10" />
+                    </div>
+
+                    {/* Pure Admin View (Monitoring All) */}
+                    {currentUser.role === 'admin' && !adminViewingStaff ? (
+                      <div className="bg-white p-5 rounded-2xl border border-earth-200 shadow-sm">
+                        <h3 className="font-bold text-earth-800 mb-4 flex items-center gap-2"><List size={18}/> 當日全體銷售紀錄</h3>
+                        <div className="space-y-3">
+                          {sales.filter(s => s.date === selectedDate).length === 0 ? <p className="text-center text-earth-400 py-10 bg-earth-50 rounded-xl border border-dashed border-earth-200">本日尚無紀錄</p> : 
+                          sales.filter(s => s.date === selectedDate).map(s => (
+                            <div key={s.id} className="flex justify-between items-start border-b border-earth-100 pb-4 last:border-0 last:pb-0">
+                              <div className="flex gap-3">
+                                {s.imageUrl ? <img src={s.imageUrl} className="w-14 h-14 object-cover rounded-xl border border-earth-200 cursor-zoom-in" onClick={() => setPreviewImage(s.imageUrl)} /> : <div className="w-14 h-14 bg-earth-100 rounded-xl flex items-center justify-center text-earth-300"><FileText size={20}/></div>}
+                                <div><div className="font-bold text-earth-800">{s.salespersonName}</div><div className="text-xs text-earth-500 mt-1">{s.note || '無備註'}</div></div>
+                              </div>
+                              <div className="text-right"><div className="font-bold text-earth-800 text-lg">${s.amount}</div><button onClick={() => handleDeleteSale(s.id)} className="text-xs text-red-400 mt-1 hover:underline font-medium">刪除</button></div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Daily Stats Card */}
+                        <div className="bg-earth-800 text-white rounded-2xl p-6 shadow-xl relative overflow-hidden">
+                          <div className="absolute top-4 right-4">
+                            <button onClick={() => setShowInfoModal(true)} className="p-1.5 bg-white/10 hover:bg-white/20 rounded-full transition backdrop-blur-sm"><Info size={18} className="text-earth-200"/></button>
+                          </div>
+                          <div className="flex justify-between items-end mb-6">
+                            <div><p className="text-earth-300 text-xs font-medium uppercase tracking-wider mb-1">本日個人業績</p><h2 className="text-4xl font-bold font-mono tracking-tight">${dailyTotal.toLocaleString()}</h2></div>
+                            <div className="text-right"><p className="text-earth-300 text-xs font-medium uppercase tracking-wider mb-1">預計佣金</p><div className="flex items-baseline justify-end gap-1"><span className="text-2xl font-bold text-accent-400">${commissionInfo.amount.toLocaleString()}</span><span className="text-xs text-earth-900 bg-earth-200 px-2 py-0.5 rounded-full font-bold ml-1">{commissionInfo.label}</span></div></div>
+                          </div>
+                          <div className="relative pt-1">
+                            <div className="flex mb-2 items-center justify-between text-xs"><span className="text-earth-300">目前進度</span>{commissionInfo.nextTier ? <span className="text-earth-200">差 <span className="text-white font-bold">${commissionInfo.nextTier - dailyTotal}</span> 升級 (獎金 {commissionInfo.nextTierReward})</span> : <span className="text-accent-400 font-bold flex items-center gap-1"><CheckCircle2 size={12}/> 最高 Tier 達成!</span>}</div>
+                            <div className="overflow-hidden h-2 mb-4 text-xs flex rounded-full bg-earth-700"><div style={{ width: `${Math.min((dailyTotal / 12000) * 100, 100)}%` }} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-accent-500 transition-all duration-1000"></div></div>
+                          </div>
+                        </div>
+
+                        {/* Input Form (Only for owner, not admin viewer) */}
+                        {!adminViewingStaff && (
+                          <div className="bg-white p-6 rounded-2xl shadow-sm border border-earth-200">
+                            <h3 className="font-bold text-earth-800 mb-5 flex items-center gap-2"><FileText size={20} className="text-accent-600" /> 輸入新單據</h3>
+                            <form onSubmit={handleSubmitSale} className="space-y-5">
+                              <div><label className="text-xs font-bold text-earth-500 uppercase mb-1.5 block">金額</label><div className="relative"><span className="absolute left-4 top-3.5 text-earth-400 font-bold">$</span><input type="number" step="0.1" required placeholder="0.00" className="w-full pl-8 pr-4 py-3 bg-earth-50 border border-earth-200 rounded-xl focus:ring-2 focus:ring-accent-500 focus:bg-white transition text-xl font-bold text-earth-800 outline-none" value={saleAmount} onChange={(e) => setSaleAmount(e.target.value)} /></div></div>
+                              <div><label className="text-xs font-bold text-earth-500 uppercase mb-1.5 block">備註</label><input type="text" placeholder="例如: 單號 1234" className="w-full px-4 py-3 bg-earth-50 border border-earth-200 rounded-xl focus:ring-2 focus:ring-accent-500 focus:bg-white transition text-base outline-none" value={saleNote} onChange={(e) => setSaleNote(e.target.value)} /></div>
+                              <div>
+                                <label className="text-xs font-bold text-earth-500 uppercase mb-1.5 block">單據照片 (必填) <span className="text-red-500">*</span></label>
+                                <div onClick={() => fileInputRef.current?.click()} className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition min-h-[140px] group ${saleImage ? 'border-accent-400 bg-accent-50' : 'border-earth-200 hover:border-accent-300 hover:bg-earth-50'}`}>
+                                  {saleImage ? 
+                                    <div className="relative w-full text-center">
+                                      <img src={saleImage} className="h-32 w-full object-contain rounded-lg mx-auto shadow-sm" />
+                                      <p className="text-accent-700 text-xs font-bold mt-2">點擊更換照片</p>
+                                    </div> 
+                                    : <><Camera size={32} className="text-earth-300 mb-2 group-hover:text-accent-400 transition" /><span className="text-sm text-earth-500 group-hover:text-earth-700 font-medium">點擊拍照或上傳</span></>
+                                  }
+                                  <input type="file" accept="image/*" ref={fileInputRef} className="hidden" onChange={handleFileChange} />
+                                </div>
+                              </div>
+                              <button type="submit" disabled={!saleAmount || !saleImage || isSubmittingSale} className="w-full bg-earth-800 hover:bg-earth-900 disabled:bg-earth-200 disabled:text-earth-400 text-white font-bold py-4 rounded-xl shadow-lg shadow-earth-200 transition flex items-center justify-center gap-2 text-lg active:scale-[0.98]">{isSubmittingSale ? '儲存中...' : '提交紀錄'}</button>
+                            </form>
+                          </div>
+                        )}
+
+                        {/* List */}
+                        <div className="space-y-3 pb-8">
+                          <h4 className="text-xs font-bold text-earth-400 uppercase tracking-wide ml-1">本日紀錄 ({myDailySales.length})</h4>
+                          {myDailySales.length === 0 ? <div className="text-center py-8 text-earth-400 bg-earth-50 rounded-2xl border border-dashed border-earth-200">尚無紀錄</div> : 
+                          myDailySales.map((item) => (
+                            <div key={item.id} className="bg-white p-3 pr-4 rounded-2xl border border-earth-100 shadow-sm flex gap-3 items-center group">
+                              <div className="w-16 h-16 bg-earth-50 rounded-xl flex-shrink-0 overflow-hidden border border-earth-100 cursor-zoom-in relative">
+                                {item.imageUrl ? (
+                                  <>
+                                    <img src={item.imageUrl} className="w-full h-full object-cover transition group-hover:scale-105" onClick={() => setPreviewImage(item.imageUrl)} />
+                                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 flex items-center justify-center transition pointer-events-none"><ZoomIn className="text-white opacity-0 group-hover:opacity-100 drop-shadow-md" size={16}/></div>
+                                  </>
+                                ) : <div className="w-full h-full flex items-center justify-center text-earth-300"><ImageIcon size={20} /></div>}
+                              </div>
+                              <div className="flex-1 min-w-0"><div className="font-bold text-earth-800 text-lg">${item.amount}</div><div className="text-xs text-earth-500 truncate">{item.note || '無備註'}</div><div className="text-[10px] text-earth-400 mt-0.5">{new Date(item.timestamp?.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div></div>
+                              {/* Admin or Owner can delete */}
+                              <button onClick={() => handleDeleteSale(item.id)} className="text-earth-300 hover:text-red-500 p-2 bg-transparent hover:bg-red-50 rounded-full transition"><Trash2 size={18} /></button>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    };
+
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
