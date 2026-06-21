@@ -9,8 +9,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="GFE Sales">
-  <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/3135/3135715.png"> 
-  <!-- 使用一個範例 icon，實際部署請換回 icon.png -->
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="icon" href="icon.png">
 
   <!-- 1. 載入 Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -37,7 +37,7 @@
   <!-- 2. 載入 React (UMD) -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.9/babel.min.js"></script>
   
   <!-- 3. 載入 Firebase (Compat 版本) -->
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
@@ -75,7 +75,7 @@
     </div>
   </div>
 
-  <script type="text/babel">
+  <script type="text/babel" data-presets="env,react">
     const { useState, useEffect, useMemo, useRef } = React;
 
     // --- 初始化 Firebase ---
@@ -95,6 +95,28 @@
     const auth = firebase.auth();
     const db = firebase.firestore();
     const appId = 'gfe-production-v1';
+
+    const firebaseErrorMessage = (error) => {
+      console.error(error);
+      if (error?.code === 'auth/network-request-failed' || error?.code === 'unavailable') {
+        return '暫時連接唔到 Firebase，請檢查網絡後再試。';
+      }
+      if (error?.code === 'permission-denied') {
+        return 'Firebase 權限被拒絕，請檢查 Firestore Rules / Auth 設定。';
+      }
+      return '系統連線失敗，請稍後再試。';
+    };
+
+    const signInIfNeeded = async () => {
+      if (auth.currentUser) return true;
+      try {
+        await auth.signInAnonymously();
+        return true;
+      } catch (error) {
+        firebaseErrorMessage(error);
+        return false;
+      }
+    };
 
     // --- 圖示組件 ---
     const Icon = ({ name, size = 20, className = "" }) => {
@@ -172,7 +194,7 @@
     );
 
     // --- 登入頁面 ---
-    const LoginScreen = ({ onLogin, staffList, loading }) => {
+    const LoginScreen = ({ onLogin, staffList, loading, connectionError }) => {
       const [u, setU] = useState('');
       const [p, setP] = useState('');
       const [err, setErr] = useState('');
@@ -180,19 +202,25 @@
 
       const handle = async (e) => {
         e.preventDefault(); setErr(''); setLogging(true);
-        // Admin Backdoor
-        if (u === 'admin' && p === '1234') {
-          if (!auth.currentUser) await auth.signInAnonymously();
-          onLogin({ username: 'Admin', displayName: '管理員', role: 'admin' });
-        } else {
-          // 注意：Client-side 驗證密碼有安全風險，建議未來改用 Firebase Auth
-          const acc = staffList.find(x => x.username.toLowerCase() === u.trim().toLowerCase() && x.password === p.trim());
-          if (acc) {
-            if (!auth.currentUser) await auth.signInAnonymously();
-            onLogin(acc);
-          } else { setErr('帳號或密碼錯誤'); }
+        try {
+          const signedIn = await signInIfNeeded();
+          if (!signedIn) {
+            setErr('暫時連接唔到 Firebase，請檢查網絡後再試。');
+            return;
+          }
+          // Admin Backdoor
+          if (u === 'admin' && p === '1234') {
+            onLogin({ username: 'Admin', displayName: '管理員', role: 'admin' });
+          } else {
+            // 注意：Client-side 驗證密碼有安全風險，建議未來改用 Firebase Auth
+            const acc = staffList.find(x => x.username.toLowerCase() === u.trim().toLowerCase() && x.password === p.trim());
+            if (acc) {
+              onLogin(acc);
+            } else { setErr('帳號或密碼錯誤'); }
+          }
+        } finally {
+          setLogging(false);
         }
-        setLogging(false);
       };
 
       return (
@@ -206,7 +234,7 @@
             <form onSubmit={handle} className="space-y-4">
               <input type="text" required className="w-full p-5 bg-earth-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-earth-800 text-lg font-bold" value={u} onChange={e=>setU(e.target.value)} placeholder="登入帳號" />
               <input type="password" required className="w-full p-5 bg-earth-50 rounded-2xl border-none outline-none focus:ring-2 focus:ring-earth-800 text-lg font-bold" value={p} onChange={e=>setP(e.target.value)} placeholder="密碼" />
-              {err && <div className="text-red-500 text-sm font-black">{err}</div>}
+              {(err || connectionError) && <div className="text-red-500 text-sm font-black">{err || connectionError}</div>}
               <button disabled={loading || logging} className="w-full bg-earth-800 text-white font-black p-5 rounded-2xl shadow-xl active:scale-95 transition-all duration-200 mt-4 text-xl">
                 {loading ? '連接中...' : logging ? '進入中...' : '登入系統'}
               </button>
@@ -224,6 +252,7 @@
       const [sales, setSales] = useState([]);
       const [staffList, setStaffList] = useState([]);
       const [loading, setLoading] = useState(true);
+      const [connectionError, setConnectionError] = useState('');
       const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
       const [viewMode, setViewMode] = useState('daily');
       const [calDate, setCalDate] = useState(new Date());
@@ -241,7 +270,7 @@
       // Auth Listener
       useEffect(() => {
         const unsub = auth.onAuthStateChanged((u) => { 
-          if (!u) auth.signInAnonymously().catch(e => console.error(e));
+          if (!u) signInIfNeeded();
           setAuthReady(true); 
         });
         const cached = localStorage.getItem('gfe_user_session');
@@ -256,12 +285,19 @@
         const u1 = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('staff_accounts')
           .onSnapshot((s) => {
             setStaffList(s.docs.map(d => ({ id: d.id, ...d.data() })));
+            setConnectionError('');
+            setLoading(false);
+          }, (error) => {
+            setConnectionError(firebaseErrorMessage(error));
             setLoading(false);
           });
 
         const u2 = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('sales_records')
           .onSnapshot((s) => {
             setSales(s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => (b.timestamp?.seconds||0) - (a.timestamp?.seconds||0)));
+            setConnectionError('');
+          }, (error) => {
+            setConnectionError(firebaseErrorMessage(error));
           });
 
         return () => { u1(); u2(); };
@@ -359,7 +395,7 @@
       const handleViewStaffReport = (staff) => { setAdminView(staff); setActiveTab('sales'); setViewMode('calendar'); };
       const closeAdminReport = () => { setAdminView(null); setViewMode('daily'); };
 
-      if (!user) return <LoginScreen onLogin={login} staffList={staffList} loading={loading} />;
+      if (!user) return <LoginScreen onLogin={login} staffList={staffList} loading={loading} connectionError={connectionError} />;
 
       return (
         <div className="min-h-screen pb-20">
